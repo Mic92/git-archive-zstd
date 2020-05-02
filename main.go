@@ -12,7 +12,7 @@ import (
 
 func handleError(w http.ResponseWriter, format string, args ...interface{}) {
 	w.WriteHeader(500)
-	log.Fatalf(format, args...)
+	log.Printf(format, args...)
 	fmt.Fprintf(w, format, args...)
 }
 
@@ -20,35 +20,32 @@ func handler(repoRoot string, resp http.ResponseWriter, req *http.Request) {
 	treeish := req.URL.Path[len("/archive/"):]
 	treeish = strings.TrimSuffix(treeish, ".tar.zstd")
 
-	gitCmd := exec.Command("git", "-C", repoRoot, "archive", "--", treeish)
-	gitStdout, err := gitCmd.StdoutPipe()
-	defer func() { gitStdout.Close(); gitCmd.Wait() }()
-
+	cmd := exec.Command("git",
+		"-C", repoRoot,
+		"-c", "tar.tar.zstd.command=zstd",
+		"archive",
+		"--format", "tar.zstd",
+		"--", treeish)
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		handleError(resp, "Cannot open pipe to git-archive: %v", err)
 		return
 	}
-	if err := gitCmd.Start(); err != nil {
-		handleError(resp, "Cannot execute git-archive: %v", err)
-		return
-	}
-	zstdCmd := exec.Command("zstd", "-")
-	zstdCmd.Stdin = gitStdout
-	zstdStdout, err := zstdCmd.StdoutPipe()
-	defer func() { zstdStdout.Close(); zstdCmd.Wait() }()
+	defer stdout.Close()
 
-	if err != nil {
-		handleError(resp, "Cannot open pipe from zstd: %v", err)
-		return
-	}
-	if err := zstdCmd.Start(); err != nil {
-		handleError(resp, "Cannot execute zstdCmd: %v", err)
+	if err := cmd.Start(); err != nil {
+		handleError(resp, "Cannot execute git-archive: %v", err)
 		return
 	}
 
 	resp.Header().Set("Content-Type", "application/zstd")
-	if _, err := io.Copy(resp, zstdStdout); err != nil {
+	if _, err := io.Copy(resp, stdout); err != nil {
 		handleError(resp, "Pipe failed: %v", err)
+		return
+	}
+	if err := cmd.Wait(); err != nil {
+		handleError(resp, "git-archive failed: %v", err)
 	}
 }
 
